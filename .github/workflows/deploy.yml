@@ -1,0 +1,114 @@
+name: Deploy backend
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write # requerido para autenticarse en AWS via OIDC
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      # 1. Descargar el código
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 2. Preparar el lenguaje y sus dependencias
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      # 3. Ejecutar tests
+      - name: Run tests
+        run: pytest -q
+
+      # 4. Ejecutar el linter
+      - name: Run linter
+        run: ruff check .
+
+      # 5. Autenticarse en AWS mediante OIDC (sin access keys permanentes)
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      # 6. Autenticarse en ECR
+      - name: Login to ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # 7-8. Construir la imagen y etiquetarla con el SHA del commit
+      - name: Build image
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build --platform linux/amd64 \
+            -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" .
+
+      # 9. Publicarla en ECR
+      - name: Push image
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+      # 10. Actualizar ECS Express Mode
+      #
+      # `update-express-gateway-service` reemplaza por completo la
+      # estructura `primary-container` con lo que se le pase, así que hay
+      # que volver a incluir las variables de entorno y el secreto (no solo
+      # la imagen), o se perderían en cada deploy.
+      - name: Update ECS Express Mode service
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          IMAGE_TAG: ${{ github.sha }}
+          CONTAINER_PORT: ${{ vars.CONTAINER_PORT }}
+          API_KEY_SSM_ARN: ${{ vars.API_KEY_SSM_ARN }}
+        run: |
+          PRIMARY_CONTAINER=$(cat <<EOF
+          {
+            "image": "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG",
+            "containerPort": $CONTAINER_PORT,
+            "environment": [
+              {"name": "PORT", "value": "$CONTAINER_PORT"}
+            ],
+            "secrets": [
+              {"name": "API_KEY", "valueFrom": "$API_KEY_SSM_ARN"}
+            ]
+          }
+          EOF
+          )
+
+          aws ecs update-express-gateway-service \
+            --service-arn "${{ vars.ECS_SERVICE_ARN }}" \
+            --primary-container "$PRIMARY_CONTAINER"
+
+      # 11. Esperar el rollout
+      - name: Wait for rollout to stabilize
+        run: |
+          aws ecs wait services-stable \
+            --cluster "${{ vars.ECS_CLUSTER }}" \
+            --services "${{ vars.ECS_SERVICE }}"
+
+      # 12. Verificar la ruta de salud por HTTPS
+      - name: Verify health endpoint
+        run: |
+          status=$(curl -s -o /dev/null -w "%{http_code}" "${{ vars.HEALTH_URL }}")
+          if [ "$status" != "200" ]; then
+            echo "Health check failed with status $status"
+            exit 1
+          fi
+          echo "Health check OK"
