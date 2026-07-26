@@ -31,3 +31,7 @@ class ItemStore:
 
     def delete(self, item_id: int) -> bool:
         return self._items.pop(item_id, None) is not None
+
+    def reset(self) -> None:
+        self._items.clear()
+        self._ids = count(1)
