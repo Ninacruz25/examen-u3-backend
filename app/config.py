@@ -4,6 +4,7 @@ import os
 class Settings:
     def __init__(self) -> None:
         self.port = int(os.getenv("PORT", "8000"))
+        self.git_sha = os.getenv("GIT_SHA", "dev")
 
         api_key = os.getenv("API_KEY")
         if not api_key:

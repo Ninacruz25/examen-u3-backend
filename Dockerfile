@@ -16,6 +16,8 @@ COPY app ./app
 
 USER app
 
+ARG GIT_SHA=dev
+ENV GIT_SHA=${GIT_SHA}
 ENV PORT=8000
 EXPOSE 8000
 
