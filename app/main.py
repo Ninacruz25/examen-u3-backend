@@ -9,7 +9,7 @@ app.include_router(items_router)
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "version": settings.git_sha}
+    return {"status": "ok si sirve", "version": settings.git_sha}
 
 
 if __name__ == "__main__":
