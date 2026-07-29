@@ -1,7 +1,5 @@
 from fastapi import FastAPI
 
-#prueba
-
 from app.config import settings
 from app.routes.items import router as items_router
 
